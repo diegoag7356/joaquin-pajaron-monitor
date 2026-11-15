@@ -1,3 +1,4 @@
+
 name: Monitor Joaquín Pajarón
 
 on:
@@ -5,39 +6,153 @@ on:
     - cron: "0 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Comprobar actuaciones
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Comprobar actuaciones y enviar informe
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python - <<'PY'
-          import requests
+          import urllib.request
+          import json
+          import re
+          import html
+          import os
+          import subprocess
 
-          url = "https://www.joaquinpajaron.com/actuaciones/"
+          URL = "https://www.joaquinpajaron.com/actuaciones/"
+          MARKER = ".monitor_alerted"
+          WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
-          r = requests.get(
-              url,
-              headers={"User-Agent": "Mozilla/5.0"},
-              timeout=20
-          )
+          def send(message):
+              data = json.dumps({
+                  "content": message
+              }).encode("utf-8")
 
-          print("Estado:", r.status_code)
+              req = urllib.request.Request(
+                  WEBHOOK,
+                  data=data,
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
 
-          if r.status_code != 200:
-              raise Exception(f"La web respondió con {r.status_code}")
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  if response.status not in (200, 204):
+                      raise Exception("Error enviando Discord")
 
-          text = r.text.lower()
+          try:
+              req = urllib.request.Request(
+                  URL,
+                  headers={
+                      "User-Agent": "Mozilla/5.0"
+                  }
+              )
 
-          palabras = [
-              "26 de diciembre",
-              "campoamor",
-              "oviedo"
-          ]
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  page = response.read().decode(
+                      "utf-8", errors="replace"
+                  )
 
-          if all(p in text for p in palabras):
-              print("🎟️ ¡PUEDE HABER APARECIDO LA ACTUACIÓN!")
-          else:
-              print("Todavía no aparece.")
+              text = html.unescape(page).lower()
+              text = re.sub(r"<[^>]+>", " ", text)
+              text = re.sub(r"\s+", " ", text)
+
+              date_found = any(x in text for x in [
+                  "26 de diciembre",
+                  "26 diciembre",
+                  "26/12/2026",
+                  "26-12-2026"
+              ])
+
+              location_found = (
+                  "campoamor" in text and
+                  "oviedo" in text
+              )
+
+              tickets_found = any(x in text for x in [
+                  "entradas",
+                  "comprar",
+                  "reservar"
+              ])
+
+              detected = (
+                  date_found and
+                  location_found and
+                  tickets_found
+              )
+
+              if detected:
+                  if not os.path.exists(MARKER):
+                      send(
+                          "🎟️ **¡POSIBLE VENTA DE ENTRADAS DETECTADA!**\n"
+                          "Joaquín Pajarón - Teatro Campoamor, Oviedo.\n"
+                          "Fecha: 26 de diciembre de 2026.\n"
+                          "Comprueba la disponibilidad aquí:\n" + URL
+                      )
+
+                      with open(MARKER, "w") as f:
+                          f.write("alerted")
+
+                      subprocess.run(
+                          ["git", "config", "user.name",
+                           "github-actions[bot]"],
+                          check=True
+                      )
+
+                      subprocess.run(
+                          ["git", "config", "user.email",
+                           "41898282+github-actions[bot]@users.noreply.github.com"],
+                          check=True
+                      )
+
+                      subprocess.run(
+                          ["git", "add", MARKER],
+                          check=True
+                      )
+
+                      subprocess.run(
+                          ["git", "commit", "-m",
+                           "Registrar alerta de entradas"],
+                          check=True
+                      )
+
+                      subprocess.run(
+                          ["git", "push"],
+                          check=True
+                      )
+
+                      status = "🎟️ ¡VENTA POSIBLEMENTE DETECTADA!"
+                  else:
+                      status = "🎟️ La actuación sigue detectada. Ya se envió el aviso especial."
+
+              else:
+                  status = "⏳ Todavía no se ha detectado la actuación y sus entradas."
+
+              send(
+                  "🔎 **INFORME HORARIO: JOAQUÍN PAJARÓN**\n"
+                  + status + "\n\n"
+                  "Página: " + URL
+              )
+
+              print(status)
+
+          except Exception as e:
+              print("Error:", str(e))
+
+              send(
+                  "⚠️ **ERROR EN EL MONITOR DE JOAQUÍN PAJARÓN**\n"
+                  "No se ha podido verificar la página.\n"
+                  "Detalles: " + str(e)[:400]
+              )
+
+              raise
           PY
